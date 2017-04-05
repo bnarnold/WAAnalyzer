@@ -5,16 +5,16 @@
 
 module Parser where
 
-import Data.Dates
+import Data.Time
 import qualified Data.Text.Lazy as T
 import qualified Data.Text.Lazy.IO as I
 import Text.Megaparsec
 import Text.Megaparsec.Text.Lazy
 import Control.Lens
 import Control.Applicative (liftA2,liftA3)
+import qualified Data.Map as M
 
-
-data User = User T.Text | Number T.Text deriving (Show,Eq)
+data User = User T.Text | Number T.Text deriving (Show,Eq,Ord)
 data Message = Join User -- added by User
              | Quit -- Left
              | Media -- Sent Media
@@ -25,11 +25,15 @@ data Message = Join User -- added by User
              | Message T.Text -- Sent Message
              deriving (Show)
 data Chunk = Chunk
-             { _time :: DateTime
+             { _time :: UTCTime
              , _user :: User
              , _message :: Message
              } deriving (Show)
 makeLenses ''Chunk
+
+toText :: User -> T.Text
+toText (User u)   = u
+toText (Number n) = n
 
 userP :: Parser a -> Parser User
 userP end = Number . T.pack <$> liftA2 (:) (char '\8234' *> char '+')
@@ -37,7 +41,7 @@ userP end = Number . T.pack <$> liftA2 (:) (char '\8234' *> char '+')
             <|> User . T.pack <$> manyTill noNewlineChar end
   where
     noNewlineChar = notFollowedBy eol *> anyChar
-dateP :: Parser DateTime
+dateP :: Parser UTCTime
 dateP = datify 
         <$> intP 2 -- day
         <* char '/'
@@ -51,21 +55,22 @@ dateP = datify
   where
     intP :: Int -> Parser Int
     intP n = read <$> count n digitChar
-    datify d m y h mm = DateTime y m d h mm 0
+    datify d m y h mm = UTCTime (day (toInteger y) m d) (offset h mm)
+    day = fromGregorian
+    offset h mm = secondsToDiffTime . toInteger $ 3600*h + 60+mm
 
 firstLineP :: Parser Chunk
 firstLineP = liftA2 (\d (u,m) -> Chunk d u m) (dateP <* string " - ")
                     userMessageP
   where
     userMessageP :: Parser (User,Message)
-    userMessageP =   try createP
+    userMessageP =   try firstLineP'
+                 <|> try createP
                  <|> try joinP
                  <|> try quitP
                  <|> try changeP
                  <|> try numberChangeP
-                 <|> try iconChangeP
-                 <|> try mediaP
-                 <|> firstLineP'
+                 <|> iconChangeP
     createP = (,Create) <$> userP (string " created group ")
                     <* manyTill anyChar eolf
     joinP = liftA2 join' (userP (string " added ")) (userP eolf)
@@ -79,9 +84,9 @@ firstLineP = liftA2 (\d (u,m) -> Chunk d u m) (dateP <* string " - ")
       ((try (userP (string " changed from"))
       <|> userP (string " changed to "))
       <* manyTill anyChar eolf)
-    mediaP = (,Media) <$> userP (string ": <Media omitted>" <* eolf)
-    firstLineP' = liftA2 mess' (userP (string ": ")) (manyTill anyChar eolf)
-    mess' u t = (u, Message $ T.pack t)
+    firstLineP' = liftA2 (,) (userP (string ": "))
+                  (try (string "<Media omitted>" *> eolf *> return Media)
+                  <|> Message . T.pack <$> manyTill anyChar eolf)
     eolf = eof <|> (eol *> return ())
 
 chunksP :: Parser [Chunk]
@@ -98,10 +103,10 @@ chunksP =   eof *> return [] <|> (firstLineP >>= chunksP')
               where
                 c' = c & message .~ (Message . T.intercalate "\n" $ t:ls)
         _ -> (c:) <$> chunksP
-remNextChunk =   eof *> return ([],Nothing)
-             <|> ([],) . Just <$> try firstLineP
-             <|> liftA2 (\l (ls,c) -> (l:ls,c)) line remNextChunk
-line = T.pack <$> manyTill anyChar (eof <|> eol *> return ())
+    remNextChunk =   eof *> return ([],Nothing)
+                 <|> ([],) . Just <$> try firstLineP
+                 <|> liftA2 (\l (ls,c) -> (l:ls,c)) line remNextChunk
+    line = T.pack <$> manyTill anyChar (eof <|> eol *> return ())
 
 isMedia :: Message -> Bool
 isMedia Media = True
@@ -115,12 +120,22 @@ isUser (Number _) = False
 test :: (Show a) => Parser a -> String -> IO ()
 test p = parseTest p . T.pack
 
-file :: String
-file = "/home/bertram/Downloads/Bonnsai.txt"
+isMessage :: Chunk -> Bool
+isMessage (Chunk _ _ (Message _)) = True
+isMessage (Chunk _ _ Media)       = True
+isMessage _                       = False
 
-bertram :: User
-bertram = User $ T.pack "Bertram"
-
-messages :: IO [Chunk]
-messages = (parseMaybe chunksP <$> I.readFile file)
-           >>= maybe (putStrLn "Parse failed" >> return []) return
+dictP :: Parser (M.Map User (Int,NominalDiffTime),M.Map (User,User) Int)
+dictP = toDict . filter isMessage <$> chunksP
+  where
+    toDict = toDict' (M.empty,M.empty)
+    toDict' dd [] = dd
+    toDict' dd [_] = dd
+    toDict' (td,ud) (c:cs@(c':_))
+      = let (Chunk d u _) = c
+            (Chunk d' u' _) = c'
+            dt = diffUTCTime d' d
+        in toDict'
+           (M.insertWith (\(n,t) (k,dt)->(n+k,t+dt)) u (1,dt) td
+           ,M.insertWith (+) (u,u') 1 ud)
+           cs
