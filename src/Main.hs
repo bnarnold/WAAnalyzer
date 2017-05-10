@@ -12,7 +12,7 @@ import Numeric.LinearAlgebra
 import Data.Complex (realPart)
 
 file :: String
-file = "/home/bertram/Downloads/Bonnsai.txt"
+file = "/home/bertram/Downloads/la famiglia.txt"
 
 messages :: IO [Chunk]
 messages = filter isMessage <$> ((parseMaybe chunksP <$> I.readFile file)
