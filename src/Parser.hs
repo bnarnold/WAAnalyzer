@@ -16,12 +16,14 @@ import qualified Data.Map as M
 
 data User = User T.Text | Number T.Text deriving (Show,Eq,Ord)
 data Message = Join User -- added by User
+             | Join' -- Joined
              | Quit -- Left
              | Media -- Sent Media
              | IconChange -- Changed Icon
              | NumberChange -- Changed Number
              | Create -- Created group
              | Change -- Changed group subject
+             | Encrypt -- WhatsApp message about encryption
              | Message T.Text -- Sent Message
              deriving (Show)
 data Chunk = Chunk
@@ -67,19 +69,25 @@ firstLineP = liftA2 (\d (u,m) -> Chunk d u m) (dateP <* string " - ")
     userMessageP =   try firstLineP'
                  <|> try createP
                  <|> try joinP
+                 <|> try joinP'
                  <|> try quitP
                  <|> try changeP
                  <|> try numberChangeP
-                 <|> iconChangeP
+                 <|> try iconChangeP
+                 <|> encryptP
     createP = (,Create) <$> userP (string " created group ")
                     <* manyTill anyChar eolf
     joinP = liftA2 join' (userP (string " added ")) (userP eolf)
     join' u1 u2 = (u2, Join u1)
+    joinP' = (,Join') <$> userP (string " was added" <* eolf)
     quitP = (,Quit) <$> userP (string " left" <* eolf)
     changeP = (,Change) <$> userP (string " changed the subject to ")
                     <* manyTill anyChar eolf
     iconChangeP = (,IconChange) <$> userP
       (string " changed this group's icon" <* eolf)
+    encryptP = string ("Messages you send to this group are now secured "
+                ++ "with end-to-end encryption. Tap for more info.")
+               *> eolf *> return (User "WhatsApp",Encrypt)
     numberChangeP = (,NumberChange) <$>
       ((try (userP (string " changed from"))
       <|> userP (string " changed to "))
